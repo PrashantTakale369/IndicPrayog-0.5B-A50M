@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+import math
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ SUPPORTED_ROUTER_DTYPES = ("fp32", "bf16", "fp16")
 UINT16_VOCAB_LIMIT = 65536
 
 
-@dataclass
+@dataclass(frozen=True)
 class IndicPrayogConfig:
     model_type: str = MODEL_TYPE
 
@@ -52,16 +53,42 @@ class IndicPrayogConfig:
 
     tie_word_embeddings: bool = False
     attention_dropout: float = 0.0
-
-    _validated: bool = field(default=False, repr=False, compare=False)
+    initializer_range: float = 0.02
 
     def __post_init__(self) -> None:
         self.validate()
-        self._validated = True
 
     # -- validation ------------------------------------------------------
 
     def validate(self) -> None:
+        # Annotations do not enforce runtime types (including after JSON loading).
+        integer_fields = (
+            "vocab_size",
+            "hidden_size",
+            "num_hidden_layers",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "head_dim",
+            "intermediate_size",
+            "moe_intermediate_size",
+            "max_position_embeddings",
+            "num_experts",
+            "num_experts_per_tok",
+            "num_shared_experts",
+            "first_k_dense_replace",
+        )
+        for name in integer_fields:
+            if type(getattr(self, name)) is not int:
+                raise ValueError(f"{name} must be an integer, got {getattr(self, name)!r}")
+        for name in (
+            "use_rmsnorm",
+            "use_qk_norm",
+            "tie_word_embeddings",
+            "moe_router_enable_expert_bias",
+        ):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+        self._require_choice("model_type", self.model_type, (MODEL_TYPE,))
         self._require_positive("vocab_size", self.vocab_size)
         self._require_positive("hidden_size", self.hidden_size)
         self._require_positive("num_hidden_layers", self.num_hidden_layers)
@@ -74,6 +101,10 @@ class IndicPrayogConfig:
         self._require_positive("rope_theta", self.rope_theta)
         self._require_positive("rms_norm_eps", self.rms_norm_eps)
         self._require_positive("routed_scaling_factor", self.routed_scaling_factor)
+        self._require_positive("initializer_range", self.initializer_range)
+
+        if self.head_dim % 2:
+            raise ValueError("head_dim must be even for rotary position embeddings")
 
         if self.vocab_size > UINT16_VOCAB_LIMIT:
             raise ValueError(
@@ -123,7 +154,11 @@ class IndicPrayogConfig:
                 f"num_shared_experts cannot be negative, got {self.num_shared_experts}"
             )
 
-        if not 0.0 <= self.attention_dropout < 1.0:
+        if (
+            type(self.attention_dropout) not in (float, int)
+            or not math.isfinite(self.attention_dropout)
+            or not 0.0 <= self.attention_dropout < 1.0
+        ):
             raise ValueError(
                 f"attention_dropout must be in [0.0, 1.0), got {self.attention_dropout}"
             )
@@ -134,8 +169,8 @@ class IndicPrayogConfig:
 
     @staticmethod
     def _require_positive(name: str, value: float) -> None:
-        if value <= 0:
-            raise ValueError(f"{name} must be positive, got {value}")
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive, got {value!r}")
 
     @staticmethod
     def _require_choice(name: str, value: Any, allowed: tuple[Any, ...]) -> None:
@@ -165,7 +200,7 @@ class IndicPrayogConfig:
         return self.num_attention_heads // self.num_key_value_heads
 
     def is_moe_layer(self, layer_idx: int) -> bool:
-        if not 0 <= layer_idx < self.num_hidden_layers:
+        if type(layer_idx) is not int or not 0 <= layer_idx < self.num_hidden_layers:
             raise IndexError(
                 f"layer_idx {layer_idx} out of range for {self.num_hidden_layers} layers"
             )
@@ -179,11 +214,15 @@ class IndicPrayogConfig:
     def to_json(self, path: str | Path, indent: int = 2) -> Path:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(json.dumps(self.to_dict(), indent=indent) + "\n")
+        destination.write_text(
+            json.dumps(self.to_dict(), indent=indent, allow_nan=False) + "\n", encoding="utf-8"
+        )
         return destination
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> "IndicPrayogConfig":
+        if not isinstance(values, dict):
+            raise ValueError("config must be a JSON object")
         known = {f for f in cls.__dataclass_fields__ if not f.startswith("_")}
         unknown = set(values) - known
         if unknown:
@@ -192,4 +231,4 @@ class IndicPrayogConfig:
 
     @classmethod
     def from_json(cls, path: str | Path) -> "IndicPrayogConfig":
-        return cls.from_dict(json.loads(Path(path).read_text()))
+        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
