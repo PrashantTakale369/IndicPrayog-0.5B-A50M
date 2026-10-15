@@ -1,2 +1,7 @@
 IndicPrayog_tokenizer/dataset/pools/*.txt
-IndicPrayog_tokenizer/dataset/pools/*.txt
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+checkpoints/
