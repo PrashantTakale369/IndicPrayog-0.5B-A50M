@@ -1,65 +1,120 @@
-"""MoE feed forward layer: top-k routed experts, scaled, plus an always-on shared expert."""
+"""Dropless sparse MoE; selection bias is separate from mixture weights."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
 
 import torch
-from torch import nn
+import torch.distributed as dist
+from torch import Tensor, nn
+from torch.nn import functional as F
 
 from .config import IndicPrayogConfig
-from .experts import build_expert
-from .router import Router
+from .layers import SwiGLU
 
 
-@dataclass
-class MoEOutput:
-    hidden_states: torch.Tensor
-    aux_loss: torch.Tensor
-    load_fraction: torch.Tensor
-
-
-class MoELayer(nn.Module):
-    def __init__(self, config: IndicPrayogConfig) -> None:
+class TopKRouter(nn.Module):
+    def __init__(self, config: IndicPrayogConfig):
         super().__init__()
-        self.num_experts = config.num_experts
-        self.top_k = config.num_experts_per_tok
-        self.routed_scaling_factor = config.routed_scaling_factor
-        self.router = Router(config)
-        self.experts = nn.ModuleList(build_expert(config) for _ in range(config.num_experts))
-        self.shared_experts = nn.ModuleList(
-            build_expert(config) for _ in range(config.num_shared_experts)
+        self.config = config
+        self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
+        # This is algorithm state, not a learned parameter or an auxiliary loss.
+        self.register_buffer(
+            "expert_bias",
+            torch.zeros(config.num_experts, dtype=torch.float32)
+            if config.moe_router_enable_expert_bias
+            else None,
+        )
+        self.register_buffer(
+            "token_counts", torch.zeros(config.num_experts, dtype=torch.int64), persistent=False
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> MoEOutput:
-        batch, seq_len, hidden_size = hidden_states.shape
-        tokens = hidden_states.reshape(-1, hidden_size)
-        routing = self.router(tokens)
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        if self.expert_bias is not None:
+            self.expert_bias = self.expert_bias.float()
+        return self
 
-        assignments = routing.expert_indices.reshape(-1)
-        weights = routing.expert_weights.reshape(-1).to(tokens.dtype)
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[
+            self.config.router_dtype
+        ]
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            logits = F.linear(x.to(dtype), self.gate.weight.to(dtype)).float()
+            scores = (
+                logits.sigmoid() if self.config.score_function == "sigmoid" else logits.softmax(-1)
+            )
+            selection_scores = scores if self.expert_bias is None else scores + self.expert_bias
+            indices = selection_scores.topk(self.config.num_experts_per_tok, dim=-1).indices
+            # Bias affects selection only. Backpropagate through the original scores.
+            weights = scores.gather(-1, indices)
+            if self.config.num_experts_per_tok > 1:
+                weights = weights / weights.sum(-1, keepdim=True).clamp_min(
+                    torch.finfo(scores.dtype).tiny
+                )
+            weights = weights * self.config.routed_scaling_factor
+        if self.training and self.expert_bias is not None:
+            with torch.no_grad():
+                self.token_counts.add_(
+                    torch.bincount(indices.reshape(-1), minlength=self.config.num_experts)
+                )
+        return indices, weights
 
-        # group assignments by expert so each expert runs one batched matmul
-        order = torch.argsort(assignments)
-        counts = torch.bincount(assignments, minlength=self.num_experts)
-        boundaries = counts.cumsum(0).tolist()
+    @torch.no_grad()
+    def update_bias(self, update_rate: float = 1e-3, synchronize: bool = True) -> None:
+        """Call once after an optimizer step, after all accumulated microbatches.
 
-        routed = torch.zeros_like(tokens)
-        start = 0
-        for expert_idx, end in enumerate(boundaries):
-            if end > start:
-                slots = order[start:end]
-                token_idx = slots // self.top_k
-                expert_out = self.experts[expert_idx](tokens[token_idx])
-                routed.index_add_(0, token_idx, expert_out * weights[slots].unsqueeze(-1))
-            start = end
+        In DDP every rank must call this, including ranks with no local valid tokens.
+        No state changes occur during evaluation. Counts reset after the update.
+        """
+        if not math.isfinite(update_rate) or update_rate < 0:
+            raise ValueError("update_rate must be finite and nonnegative")
+        if self.expert_bias is None:
+            return
+        counts = self.token_counts.clone()
+        if synchronize and dist.is_available() and dist.is_initialized():
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+        counts = counts.float()
+        self.expert_bias.add_(update_rate * (counts.mean() - counts).sign())
+        self.token_counts.zero_()
 
-        out = routed * self.routed_scaling_factor
-        for shared_expert in self.shared_experts:
-            out = out + shared_expert(tokens)
 
-        return MoEOutput(
-            hidden_states=out.view(batch, seq_len, hidden_size),
-            aux_loss=routing.aux_loss,
-            load_fraction=routing.load_fraction,
+class SparseMoE(nn.Module):
+    def __init__(self, config: IndicPrayogConfig):
+        super().__init__()
+        self.router = TopKRouter(config)
+        self.experts = nn.ModuleList(
+            [
+                SwiGLU(config.hidden_size, config.moe_intermediate_size)
+                for _ in range(config.num_experts)
+            ]
         )
+        # Concatenating shared experts into a wider SwiGLU gives the same summed output.
+        self.shared_experts = (
+            SwiGLU(config.hidden_size, config.moe_intermediate_size * config.num_shared_experts)
+            if config.num_shared_experts
+            else None
+        )
+
+    def forward(self, x: Tensor, token_mask: Tensor | None = None) -> Tensor:
+        shape = x.shape
+        flat = x.reshape(-1, shape[-1])
+        valid_indices = None
+        if token_mask is not None:
+            valid_indices = token_mask.reshape(-1).nonzero(as_tuple=True)[0]
+            flat = flat.index_select(0, valid_indices)
+        selected, weights = self.router(flat)
+        output = torch.zeros_like(flat)
+        # Dispatch only selected tokens; no capacity limit and no dropped assignments.
+        for expert_idx, expert in enumerate(self.experts):
+            token_idx, slot = torch.where(selected == expert_idx)
+            if token_idx.numel() == 0:
+                continue
+            expert_output = expert(flat.index_select(0, token_idx))
+            contribution = (expert_output.float() * weights[token_idx, slot, None]).to(output.dtype)
+            output = output.index_add(0, token_idx, contribution)
+        if self.shared_experts is not None:
+            output = output + self.shared_experts(flat)
+        if valid_indices is not None:
+            output = torch.zeros_like(x.reshape(-1, shape[-1])).index_copy(0, valid_indices, output)
+        return output.reshape(shape)

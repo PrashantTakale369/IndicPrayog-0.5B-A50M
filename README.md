@@ -81,6 +81,7 @@ The expert diagram contrasts the leading dense layer with the later sparse layer
 
 ```text
 IndicPrayog-0.5B-A50M/
+├── .github/workflows/model-tests.yml      # Model correctness checks in CI
 ├── assets/                                # Architecture and component diagrams
 ├── IndicPrayog_tokenizer/
 │   ├── scripts/                           # Training and comparison scripts
@@ -97,17 +98,18 @@ IndicPrayog-0.5B-A50M/
 ├── model/
 │   ├── __init__.py                        # Public package imports
 │   ├── config.py                          # Architecture settings and checks
-│   ├── norm.py                            # RMS normalization
-│   ├── rope.py                            # Rotary position embeddings
-│   ├── attention.py                       # Grouped query attention
-│   ├── experts.py                         # SwiGLU feed forward networks
-│   ├── router.py                          # Expert selection and balancing
-│   ├── moe.py                             # Routed and shared expert dispatch
-│   ├── model.py                           # Decoder stack and next-token loss
-│   └── Readme.md
+│   ├── layers.py                          # Normalization, positions, attention, and FFNs
+│   ├── moe.py                             # Expert routing, dispatch, and load balancing
+│   ├── modeling.py                        # Decoder, loss, generation, and save/load
+│   ├── parameter_count.py                 # Total and active parameter calculations
+│   ├── smoke_test.py                      # Tiny and full model forward/backward checks
+│   └── Readme.md                          # Model guide and usage
 ├── documentation/
 │   ├── 1_tokenizer/full_overview.md       # Tokenizer design and results
 │   └── 2_data_processing/full_overview.md # Dataset pipeline and measured totals
+├── tests/                                 # Configuration and model correctness tests
+├── requirements-model.txt                 # Model runtime dependency
+├── ruff.toml                              # Python lint and formatting rules
 ├── LICENSE
 └── README.md
 ```

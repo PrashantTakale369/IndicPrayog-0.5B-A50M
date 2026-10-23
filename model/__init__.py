@@ -1,36 +1,15 @@
-"""IndicPrayog-0.5B-A50M model package."""
+"""Scratch IndicPrayog MoE. Importing the config alone does not require PyTorch."""
 
-from .attention import Attention
 from .config import IndicPrayogConfig
-from .experts import SwiGLU
-from .moe import MoELayer
-from .model import (
-    CausalLMOutput,
-    DecoderLayer,
-    IndicPrayogForCausalLM,
-    IndicPrayogModel,
-    count_parameters,
-    expected_active_parameters,
-    expected_total_parameters,
-)
-from .norm import RMSNorm
-from .rope import RotaryEmbedding, apply_rotary_pos_emb
-from .router import Router
 
-__all__ = [
-    "Attention",
-    "CausalLMOutput",
-    "DecoderLayer",
-    "IndicPrayogConfig",
-    "IndicPrayogForCausalLM",
-    "IndicPrayogModel",
-    "MoELayer",
-    "RMSNorm",
-    "RotaryEmbedding",
-    "Router",
-    "SwiGLU",
-    "apply_rotary_pos_emb",
-    "count_parameters",
-    "expected_active_parameters",
-    "expected_total_parameters",
-]
+__all__ = ["IndicPrayogConfig", "IndicPrayogForCausalLM", "CausalLMOutput"]
+
+
+def __getattr__(name):
+    if name in ("IndicPrayogForCausalLM", "CausalLMOutput"):
+        from .modeling import CausalLMOutput, IndicPrayogForCausalLM
+
+        return {"IndicPrayogForCausalLM": IndicPrayogForCausalLM, "CausalLMOutput": CausalLMOutput}[
+            name
+        ]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

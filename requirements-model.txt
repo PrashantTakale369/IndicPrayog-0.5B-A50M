@@ -1,0 +1,2 @@
+# Model runtime and architecture tests; tokenizer/data-pipeline dependencies are separate.
+torch>=2.5,<3
