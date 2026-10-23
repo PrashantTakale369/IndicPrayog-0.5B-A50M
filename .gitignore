@@ -1,2 +1,5 @@
 IndicPrayog_tokenizer/dataset/pools/*.txt
 IndicPrayog_tokenizer/dataset/pools/*.txt
+row_not_push_material/
+__pycache__/
+*.pyc

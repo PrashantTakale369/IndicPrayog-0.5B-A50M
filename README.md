@@ -1,61 +1,118 @@
 # IndicPrayog-0.5B-A50M
 
-An experimental 0.5B parameter sparse Indic language model with approximately 50M active parameters per token, trained from scratch using a scaled down Sarvam-30B inspired architecture for learning purpose only.
+An open learning project to build and train a small Mixture of Experts language model for **Hindi, Marathi, and English**, from tokenizer to evaluation.
 
-## Abstract
+**The goal: understand how an Indic language model is built by building one ourselves.** We are targeting roughly 0.5 billion total parameters and approximately 50 million active parameters in the transformer core per token, with a training corpus of about 10 billion tokens.
 
-IndicPrayog is a Mixture of Experts language model for Hindi, Marathi, and English, built end to end in the open: custom tokenizer, own dataset pipeline, own architecture code, own training run. Nothing is inherited from a pretrained checkpoint.
+The tokenizer and dataset preparation are complete, and the model architecture is implemented. Training and evaluation are the next stages.
 
-The model has 502.9M total parameters of which only 54.2M are active per token, achieved with 19 layers where layer 0 uses a dense feed forward network and layers 1 to 18 each hold 46 routed experts plus 1 shared expert, with 2 routed experts selected per token. Attention is grouped query attention with 12 query heads over 2 key value heads, plus RoPE positions and QK normalization.
+## Why we are doing this
 
-Training data is a 10.01 billion token corpus packed into fixed 2048 token rows, drawn from Sangraha, Wikipedia, and FineWeb-Edu at a 40% Hindi, 35% English, 25% Marathi mix, encoded with a purpose built 64,000 vocabulary tokenizer trained on the same language mix. Every stage is measured rather than assumed, and every decision is written down in `documentation/`.
+Using a language model leaves many decisions hidden: how text becomes tokens, how languages share a data budget, how experts receive tokens, and what makes training stable. IndicPrayog makes these decisions visible through code, experiments, and written explanations.
 
-## Sections
+- **Learn the whole process.** Build the tokenizer, prepare the corpus, implement the model, train it, and measure what it learns.
+- **Work with languages we care about.** Give Hindi and Marathi deliberate attention alongside English, including tokenizer efficiency and evaluation for each language.
+- **Explore sparse computation at a manageable scale.** Study how a model can store many expert networks while using only a small subset for each token.
+- **Make the work useful to other learners.** Keep the reasoning, measurements, and mistakes alongside the implementation so others can follow and reproduce the experiment.
 
-| # | section | path | what it covers |
-|---|---------|------|----------------|
-| 1 | Tokenizer | [IndicPrayog_tokenizer/](IndicPrayog_tokenizer/) | 6 tokenizer variants trained and ablated, 5 public baselines compared, final 64k vocabulary tokenizer selected and frozen |
-| 2 | Dataset preparation | [dataset_preparation/](dataset_preparation/) | 5 step pipeline from raw HuggingFace downloads to the final packed `uint16` training and validation files |
-| 3 | Model | [model/](model/) | architecture implementation, one file at a time, each independently testable |
-| 4 | Documentation | [documentation/](documentation/) | full written overview of every phase: why each choice was made, what was measured, what broke |
+## Learning from Sarvam-30B
 
-## Phase status
+[Sarvam-30B](https://huggingface.co/sarvamai/sarvam-30b) is the architectural reference for this experiment. We adapt its pattern of a leading dense feed forward layer followed by layers with routed and shared experts, together with grouped query attention. In a Mixture of Experts model, a router chooses which expert networks process each token; a shared expert processes every token.
 
-| phase | scope | state |
-|-------|-------|-------|
-| 1 | Tokenizer, 64k vocabulary, trained and frozen | done |
-| 2 | Dataset, 10.01B tokens packed at 2048 context | done |
-| 3 | Model architecture implementation | in progress |
-| 4 | Training run | not started |
-| 5 | Evaluation | not started |
+Our approach is to implement these ideas at a smaller scale, use our own tokenizer and prepared corpus, and train newly initialized weights. The language scope is Hindi, Marathi, and English. The experiment will measure what this smaller design can learn within the chosen data budget.
 
-## Architecture at a glance
+![IndicPrayog architecture overview showing attention, dense feed forward, and expert layers](assets/IndicPrayog_500M_A50M_architecture.png)
 
-| property | value |
-|----------|-------|
-| total parameters | 502,904,252 |
-| active parameters per token | 54,244,796 |
-| layers | 19 (1 dense feed forward, 18 Mixture of Experts) |
-| hidden size | 768 |
-| attention | grouped query attention, 12 query heads, 2 key value heads, head dim 64 |
-| positions | RoPE, theta 8,000,000, configured for 131,072 context |
-| experts per Mixture of Experts layer | 46 routed plus 1 shared |
-| experts active per token | 2 routed plus 1 shared |
-| router | sigmoid scoring in fp32, expert bias for load balancing |
-| vocabulary | 64,000, untied input embedding and output head |
-| training context length | 2048 |
+*Architecture overview. The 128K label is a configured position limit; the planned pretraining sequences are 2,048 tokens long. Context-length performance remains to be evaluated.*
 
-## Dataset at a glance
+## How we scale it down
 
-| property | value |
-|----------|-------|
-| total training tokens | 10,011,318,272 |
-| packed rows | 4,888,339 |
-| row length | 2048 tokens |
-| storage dtype | `uint16` |
-| language mix | Hindi 40%, English 35%, Marathi 25% |
-| sources | Sangraha, Wikipedia, FineWeb-Edu |
-| validation holdout | 0.5% per language, held out before tokenization |
+We retain the 19-layer depth and reduce the width of the networks. Using the dimensions in [Sarvam's published configuration](https://huggingface.co/sarvamai/sarvam-30b/blob/main/config.json), the width multiplier is:
+
+```text
+Width multiplier = 768 / 4096 = 3/16 = 0.1875
+
+Hidden width:          4096 × 0.1875 = 768
+Dense FFN width:       8192 × 0.1875 = 1536
+Expert FFN width:      1024 × 0.1875 = 192
+```
+
+For a weight matrix whose two dimensions both shrink by this factor, the parameter count scales by `0.1875² ≈ 0.0352`. Vocabulary size and expert count have their own budgets, so the final model size comes from counting all components together.
+
+Each SwiGLU expert has three weight matrices. This gives us a simple way to budget expert capacity:
+
+```text
+Parameters per expert = 3 × hidden width × expert FFN width
+                      = 3 × 768 × 192
+                      = 442,368
+
+Stored expert weights = 18 layers × (46 routed + 1 shared) × 442,368
+                      = 374,243,328 parameters
+```
+
+We choose 46 routed experts to bring the complete model, including attention, the dense layer, routers, embeddings, and output head, to **502.9M parameters**. Our custom 64K vocabulary keeps the embedding and output tables within that budget while focusing tokenizer capacity on the three target languages.
+
+Each token uses two routed experts plus the shared expert in each expert layer. Counting those experts and the always-active transformer components gives **54.2M active parameters**. This is the approximate “A50M” in the name; it excludes the input embedding and output head. Including the output head brings that count to approximately **103.4M**.
+
+The detailed configuration and full parameter accounting are in the [model guide](model/Readme.md).
+
+<details>
+<summary>Explore the attention and expert-routing diagrams</summary>
+
+Grouped query attention lets groups of query heads share key and value heads.
+
+![Grouped query attention with shared key and value heads](assets/gqp_architecutre.png)
+
+The expert diagram contrasts the leading dense layer with the later sparse layers. For each token, only the selected routed experts and the shared expert contribute to the sparse layer's output.
+
+![Routed and shared experts alongside the dense feed forward layer](assets/moe_routing_and_layer.png)
+
+</details>
+
+## The plan and our progress
+
+1. **Build the tokenizer: complete.** Compare tokenizer variants and select a vocabulary suited to Hindi, Marathi, and English.
+2. **Prepare the data: complete.** Standardize Sangraha, Wikipedia, and FineWeb-Edu, sample a corpus of roughly 10B tokens, and create packed training data with separate validation sets. The target language mix is Hindi 40%, English 35%, and Marathi 25%.
+3. **Implement and verify the model: architecture implemented.** Check the components and parameter budget, then finish training-readiness checks on the intended hardware.
+4. **Pretrain from scratch: planned.** Establish a measured batch size and throughput, verify checkpoint recovery, and track loss and expert utilization throughout training.
+5. **Evaluate: planned.** Measure held-out language modeling and text generation in all three languages, and report the results with their limitations.
+
+## Repository structure
+
+```text
+IndicPrayog-0.5B-A50M/
+├── assets/                                # Architecture and component diagrams
+├── IndicPrayog_tokenizer/
+│   ├── scripts/                           # Training and comparison scripts
+│   ├── tokenizers_out/                    # Saved tokenizer variants
+│   └── baselines/                         # Reference tokenizers
+├── dataset_preparation/
+│   ├── dataset_lookup/                    # Explore data sources by language
+│   └── dataset_complete_pipeline/         # Prepare the training corpus
+│       ├── 1_format_standardize/          # Normalize source formats
+│       ├── 2_lang_validation/             # Check document languages
+│       ├── 3_train_and_val_split/         # Sample to the token budget
+│       ├── 4_tokenization/                # Measure tokenization and token counts
+│       └── 5_final_dataset/               # Pack training and validation rows
+├── model/
+│   ├── __init__.py                        # Public package imports
+│   ├── config.py                          # Architecture settings and checks
+│   ├── norm.py                            # RMS normalization
+│   ├── rope.py                            # Rotary position embeddings
+│   ├── attention.py                       # Grouped query attention
+│   ├── experts.py                         # SwiGLU feed forward networks
+│   ├── router.py                          # Expert selection and balancing
+│   ├── moe.py                             # Routed and shared expert dispatch
+│   ├── model.py                           # Decoder stack and next-token loss
+│   └── Readme.md
+├── documentation/
+│   ├── 1_tokenizer/full_overview.md       # Tokenizer design and results
+│   └── 2_data_processing/full_overview.md # Dataset pipeline and measured totals
+├── LICENSE
+└── README.md
+```
+
+To follow the project in order, start with the [tokenizer overview](documentation/1_tokenizer/full_overview.md), continue with the [data-processing overview](documentation/2_data_processing/full_overview.md), and then read the [model guide](model/Readme.md).
 
 ## License
 
