@@ -5,6 +5,8 @@ pretrained model weights or Transformers model classes are used. The dimensions
 are inspired by [Sarvam-30B's published configuration](https://huggingface.co/sarvamai/sarvam-30b/blob/main/config.json);
 this is an independent implementation, not a checkpoint-compatible Sarvam port.
 
+For a diagram by diagram explanation and code mapping, read the [model architecture overview](../documentation/3_model_architecture/full_overview.md).
+
 ## Architecture
 
 | Component | Default |

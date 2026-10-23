@@ -106,7 +106,8 @@ IndicPrayog-0.5B-A50M/
 │   └── Readme.md                          # Model guide and usage
 ├── documentation/
 │   ├── 1_tokenizer/full_overview.md       # Tokenizer design and results
-│   └── 2_data_processing/full_overview.md # Dataset pipeline and measured totals
+│   ├── 2_data_processing/full_overview.md # Dataset pipeline and measured totals
+│   └── 3_model_architecture/full_overview.md # Architecture diagrams and code mapping
 ├── tests/                                 # Configuration and model correctness tests
 ├── requirements-model.txt                 # Model runtime dependency
 ├── ruff.toml                              # Python lint and formatting rules
@@ -114,7 +115,7 @@ IndicPrayog-0.5B-A50M/
 └── README.md
 ```
 
-To follow the project in order, start with the [tokenizer overview](documentation/1_tokenizer/full_overview.md), continue with the [data-processing overview](documentation/2_data_processing/full_overview.md), and then read the [model guide](model/Readme.md).
+To follow the project in order, start with the [tokenizer overview](documentation/1_tokenizer/full_overview.md), continue with the [data processing overview](documentation/2_data_processing/full_overview.md), and then read the [model architecture overview](documentation/3_model_architecture/full_overview.md). The [model guide](model/Readme.md) provides installation and API usage.
 
 ## License
 
